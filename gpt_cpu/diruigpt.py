@@ -197,7 +197,7 @@ def process_documents(ignored_files: List[str] = []) -> List[Document]:
     documents = load_documents(source_directory, ignored_files)
     if not documents:
         print("No new documents to load")
-        return None
+        exit(0)
     print(f"Loaded {len(documents)} new documents from {source_directory}")
     text_documents, cpp_documents, java_documents = split_documents(documents)
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
@@ -239,16 +239,12 @@ def ingest_data():
         db = Chroma(persist_directory=persist_directory, embedding_function=embeddings, client_settings=CHROMA_SETTINGS)
         collection = db.get()
         texts = process_documents([metadata['source'] for metadata in collection['metadatas']])
-        if texts is None:
-            return jsonify(response="No new documents to load")
         print(f"Creating embeddings. May take some minutes...")
         db.add_documents(texts)
     else:
         # Create and store locally vectorstore
         print("Creating new vectorstore")
         texts = process_documents()
-        if texts is None:
-            return jsonify(response="No new documents to load")
         print(f"Creating embeddings. May take some minutes...")
         db = Chroma.from_documents(texts, embeddings, persist_directory=persist_directory,
                                    client_settings=CHROMA_SETTINGS)
@@ -269,43 +265,56 @@ def get_answer():
     callbacks = [] if args.mute_stream else [StreamingStdOutCallbackHandler()]
     if llm == None:
         return "Model not downloaded", 400
-    refine_prompt_template = (
-        "Below is an instruction that describes a task. "
-        "Write a response that appropriately completes the request.\n\n"
-        "### Instruction:\n"
-        "这是原始问题: {question}\n"
-        "已有的回答: {existing_answer}\n"
-        "现在还有一些文字，（如果有需要）你可以根据它们完善现有的回答。"
-        "\n\n"
-        "{context_str}\n"
-        "\\nn"
-        "请根据新的文段，进一步完善你的回答。\n\n"
-        "### Response: "
+    # refine_prompt_template = (
+    #     "Below is an instruction that describes a task. "
+    #     "Write a response that appropriately completes the request.\n\n"
+    #     "### Instruction:\n"
+    #     "这是原始问题: {question}\n"
+    #     "已有的回答: {existing_answer}\n"
+    #     "现在还有一些文字，（如果有需要）你可以根据它们完善现有的回答。"
+    #     "\n\n"
+    #     "{context_str}\n"
+    #     "\\nn"
+    #     "请根据新的文段，进一步完善你的回答。\n\n"
+    #     "### Response: "
+    # )
+    #
+    # initial_qa_template = (
+    #     "Below is an instruction that describes a task. "
+    #     "Write a response that appropriately completes the request.\n\n"
+    #     "### Instruction:\n"
+    #     "以下为背景知识：\n"
+    #     "{context_str}"
+    #     "\n"
+    #     "请根据以上背景知识, 回答这个问题：{question}。\n\n"
+    #     "### Response: "
+    # )
+    # refine_prompt = PromptTemplate(
+    #     input_variables=["question", "existing_answer", "context_str"],
+    #     template=refine_prompt_template,
+    # )
+    # initial_qa_prompt = PromptTemplate(
+    #     input_variables=["context_str", "question"],
+    #     template=initial_qa_template,
+    # )
+
+    alpaca2_prompt_template = (
+        "[INST] <<SYS>>\n"
+        "You are a helpful assistant. 你是一个乐于助人的助手。\n"
+        "<</SYS>>\n\n"
+        "{context}\n\n{question} [/INST]"
     )
 
-    initial_qa_template = (
-        "Below is an instruction that describes a task. "
-        "Write a response that appropriately completes the request.\n\n"
-        "### Instruction:\n"
-        "以下为背景知识：\n"
-        "{context_str}"
-        "\n"
-        "请根据以上背景知识, 回答这个问题：{question}。\n\n"
-        "### Response: "
-    )
-    refine_prompt = PromptTemplate(
-        input_variables=["question", "existing_answer", "context_str"],
-        template=refine_prompt_template,
-    )
-    initial_qa_prompt = PromptTemplate(
-        input_variables=["context_str", "question"],
-        template=initial_qa_template,
-    )
-    chain_type_kwargs = {"question_prompt": initial_qa_prompt, "refine_prompt": refine_prompt}
-    qa = RetrievalQA.from_chain_type(
-        llm=llm, chain_type="refine",
-        retriever=retriever, return_source_documents=not args.hide_source,
-        chain_type_kwargs=chain_type_kwargs)
+
+    input_with_prompt = PromptTemplate(template=alpaca2_prompt_template, input_variables=["context", "question"])
+    qa = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=retriever,
+                                     return_source_documents=not args.hide_source,
+                                     chain_type_kwargs={"prompt": input_with_prompt})
+    # chain_type_kwargs = {"question_prompt": initial_qa_prompt, "refine_prompt": refine_prompt}
+    # qa = RetrievalQA.from_chain_type(
+    #     llm=llm, chain_type="refine",
+    #     retriever=retriever, return_source_documents=not args.hide_source,
+    #     chain_type_kwargs=chain_type_kwargs)
 
     if query != None and query != "":
         res = qa(query)
@@ -364,14 +373,14 @@ def download_and_save():
 
 
 def load_model():
-    filename = 'ggml-model-q4_0_q5_k_s_zxl.bin'  # Specify the name for the downloaded file
+    filename = 'ggml-model-q4_0_q6s_zxl.bin'  # Specify the name for the downloaded file
     models_folder = 'models'  # Specify the name of the folder inside the Flask app root
     file_path = f'{models_folder}/{filename}'
     if os.path.exists(file_path):
         global llm
         callbacks = [StreamingStdOutCallbackHandler()]
         llm = LlamaCpp(model_path=model_path, n_ctx=model_n_ctx, n_batch=model_n_batch, callbacks=callbacks,
-                       verbose=False, n_threads=16)
+                       verbose=False,  n_threads=16,n_gpu_layers=os.environ.get('N_GPU_LAYERS'))
 
 
 def main():
